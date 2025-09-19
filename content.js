@@ -70,9 +70,60 @@ const pageAnalysisCache = {
   }
 };
 
-// Global error handler for uncaught exceptions
+// Enhanced global error handler for the extension
 window.addEventListener('error', (event) => {
-  console.error('Load More Extension - Uncaught error:', event.error);
+  console.error('Blind nudist Extension: Uncaught error:', {
+    message: event.message,
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    error: event.error,
+    stack: event.error?.stack
+  });
+  
+  // Notify background script of critical errors
+  try {
+    chrome.runtime.sendMessage({
+      type: 'ERROR_REPORT',
+      error: {
+        message: event.message,
+        source: event.filename,
+        line: event.lineno,
+        column: event.colno,
+        stack: event.error?.stack,
+        url: window.location.href,
+        timestamp: Date.now()
+      }
+    }).catch(() => {
+      // Silently handle messaging errors to avoid infinite loops
+    });
+  } catch (e) {
+    // Silently handle chrome.runtime errors
+  }
+});
+
+// Handle unhandled promise rejections
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Blind nudist Extension: Unhandled promise rejection:', {
+    reason: event.reason,
+    promise: event.promise,
+    url: window.location.href,
+    timestamp: Date.now()
+  });
+  
+  try {
+    chrome.runtime.sendMessage({
+      type: 'PROMISE_REJECTION',
+      error: {
+        reason: event.reason?.toString(),
+        stack: event.reason?.stack,
+        url: window.location.href,
+        timestamp: Date.now()
+      }
+    }).catch(() => {});
+  } catch (e) {
+    // Silently handle chrome.runtime errors
+  }
 });
 
 // Auto-scroll to load more buttons when page loads
@@ -141,6 +192,11 @@ window.addEventListener('load', () => {
       console.log('Load More Extension: Disconnected mutation observer after timeout');
     }, 30000);
   }, 2000);
+  
+  // Ensure auto-detection is running
+  if (!autoDetectionState.isTracking) {
+    autoDetectionState.startAutoDetection();
+  }
 });
 
 // Function to automatically scroll to the first load more button
@@ -231,6 +287,197 @@ function scrollToLoadMoreButton(retryCount = 0) {
   
   return false
 }
+
+// Enhanced scroll functionality for plugin interactions
+const scrollManager = {
+  // Scroll to content bottom where new content will appear
+  scrollToContentBottom(options = {}) {
+    try {
+      const { smooth = true, offset = 100 } = options;
+      
+      // Find the main content container
+      const contentContainer = this.findMainContentContainer();
+      if (!contentContainer) {
+        console.warn('Blind nudist Extension: Could not find main content container');
+        return false;
+      }
+      
+      // Get the bottom position of current content
+      const containerRect = contentContainer.getBoundingClientRect();
+      const currentScrollY = window.pageYOffset || document.documentElement.scrollTop;
+      const contentBottom = containerRect.bottom + currentScrollY;
+      
+      // Calculate target position (content bottom minus offset)
+      const targetY = Math.max(0, contentBottom - offset);
+      
+      console.log('Blind nudist Extension: Scrolling to content bottom', {
+        contentBottom,
+        targetY,
+        offset,
+        containerRect
+      });
+      
+      if (smooth) {
+        throttledScrollTo(0, targetY);
+      } else {
+        window.scrollTo(0, targetY);
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Blind nudist Extension: Error scrolling to content bottom:', error);
+      return false;
+    }
+  },
+  
+  // Find the main content container on the page
+  findMainContentContainer() {
+    try {
+      // Common content container selectors
+      const contentSelectors = [
+        'main',
+        '[role="main"]',
+        '.main-content',
+        '.content',
+        '.posts',
+        '.items',
+        '.results',
+        '.feed',
+        '.list',
+        '#content',
+        '#main',
+        '.container:has(.post)',
+        '.container:has(.item)',
+        'article',
+        '.articles'
+      ];
+      
+      for (const selector of contentSelectors) {
+        const elements = queryElements(selector);
+        for (const element of elements) {
+          if (this.isValidContentContainer(element)) {
+            return element;
+          }
+        }
+      }
+      
+      // Fallback: find the largest container with multiple child elements
+      const allContainers = queryElements('div, section, main, article');
+      let bestContainer = null;
+      let maxScore = 0;
+      
+      for (const container of allContainers) {
+        const score = this.scoreContentContainer(container);
+        if (score > maxScore) {
+          maxScore = score;
+          bestContainer = container;
+        }
+      }
+      
+      return bestContainer;
+    } catch (error) {
+      console.error('Blind nudist Extension: Error finding content container:', error);
+      return document.body; // Ultimate fallback
+    }
+  },
+  
+  // Check if an element is a valid content container
+  isValidContentContainer(element) {
+    try {
+      if (!element || !isElementVisible(element)) return false;
+      
+      const rect = element.getBoundingClientRect();
+      const childCount = element.children.length;
+      
+      // Must have reasonable size and multiple children
+      return rect.height > 200 && rect.width > 300 && childCount >= 3;
+    } catch (error) {
+      return false;
+    }
+  },
+  
+  // Score a container based on content characteristics
+  scoreContentContainer(element) {
+    try {
+      let score = 0;
+      
+      // Size scoring
+      const rect = element.getBoundingClientRect();
+      score += Math.min(rect.height / 100, 10); // Height bonus (max 10)
+      score += Math.min(rect.width / 100, 5);   // Width bonus (max 5)
+      
+      // Child count scoring
+      const childCount = element.children.length;
+      score += Math.min(childCount, 20); // Child count bonus (max 20)
+      
+      // Content type scoring
+      const className = element.className.toLowerCase();
+      const id = element.id.toLowerCase();
+      const tagName = element.tagName.toLowerCase();
+      
+      // Positive indicators
+      const positiveKeywords = ['content', 'main', 'posts', 'items', 'results', 'feed', 'list', 'articles'];
+      for (const keyword of positiveKeywords) {
+        if (className.includes(keyword) || id.includes(keyword)) {
+          score += 5;
+        }
+      }
+      
+      // Tag name bonuses
+      if (tagName === 'main') score += 10;
+      if (tagName === 'article') score += 5;
+      if (element.getAttribute('role') === 'main') score += 10;
+      
+      // Negative indicators
+      const negativeKeywords = ['header', 'footer', 'nav', 'sidebar', 'ad', 'banner'];
+      for (const keyword of negativeKeywords) {
+        if (className.includes(keyword) || id.includes(keyword)) {
+          score -= 5;
+        }
+      }
+      
+      return Math.max(0, score);
+    } catch (error) {
+      return 0;
+    }
+  },
+  
+  // Scroll to show newly loaded content
+  scrollToNewContent(previousContentCount, newContentCount) {
+    try {
+      if (newContentCount <= previousContentCount) return false;
+      
+      const contentContainer = this.findMainContentContainer();
+      if (!contentContainer) return false;
+      
+      // Find new content elements (assuming they're at the bottom)
+      const allContentItems = contentContainer.children;
+      const newItemsCount = newContentCount - previousContentCount;
+      const newItems = Array.from(allContentItems).slice(-newItemsCount);
+      
+      if (newItems.length > 0) {
+        const firstNewItem = newItems[0];
+        const rect = firstNewItem.getBoundingClientRect();
+        const currentScrollY = window.pageYOffset || document.documentElement.scrollTop;
+        const targetY = rect.top + currentScrollY - 100; // 100px offset from top
+        
+        console.log('Blind nudist Extension: Scrolling to new content', {
+          newItemsCount,
+          targetY,
+          firstNewItem
+        });
+        
+        throttledScrollTo(0, Math.max(0, targetY));
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Blind nudist Extension: Error scrolling to new content:', error);
+      return false;
+    }
+  }
+};
 
 try {
   // Maximum retry attempts
@@ -365,6 +612,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
       case 'START_EXPANSION':
         try {
+          // Scroll to content bottom before starting expansion
+          scrollManager.scrollToContentBottom({ smooth: true, offset: 150 });
+          
           startContentExpansion(message.options || {});
           sendResponse({ success: true });
         } catch (error) {
@@ -380,6 +630,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (error) {
           console.error('Error stopping content expansion:', error);
           sendResponse({ error: 'Failed to stop content expansion', details: error.message });
+        }
+        break
+        
+      case 'START_AUTO_DETECTION':
+        try {
+          autoDetectionState.startAutoDetection();
+          sendResponse({ success: true, trackedCount: autoDetectionState.trackedElements.size });
+        } catch (error) {
+          console.error('Error starting auto-detection:', error);
+          sendResponse({ error: 'Failed to start auto-detection', details: error.message });
+        }
+        break
+        
+      case 'STOP_AUTO_DETECTION':
+        try {
+          autoDetectionState.stopAutoDetection();
+          autoDetectionState.clearTracking();
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error('Error stopping auto-detection:', error);
+          sendResponse({ error: 'Failed to stop auto-detection', details: error.message });
+        }
+        break
+        
+      case 'GET_TRACKED_ELEMENTS':
+        try {
+          const trackedElements = Array.from(autoDetectionState.trackedElements).map(element => ({
+            tagName: element.tagName,
+            className: element.className,
+            textContent: element.textContent?.trim().substring(0, 50),
+            selector: generateElementSelector(element)
+          }));
+          sendResponse({ success: true, data: { trackedElements, count: trackedElements.length } });
+        } catch (error) {
+          console.error('Error getting tracked elements:', error);
+          sendResponse({ error: 'Failed to get tracked elements', details: error.message });
         }
         break
         
@@ -700,46 +986,48 @@ function startContentExpansion(options = {}) {
  */
 async function scrollToNewlyLoadedContent(previousCount, newCount) {
   try {
-    // Wait a moment for content to fully render
-    await sleep(300)
-    
-    // Get all content elements
-    const contentElements = queryElements(SELECTORS.CONTENT_CONTAINERS)
-    
-    if (contentElements.length >= previousCount + 1) {
-      // Find the first newly loaded element (at index previousCount)
-      const firstNewElement = contentElements[previousCount]
-      
-      if (firstNewElement && isElementVisible(firstNewElement)) {
-        // Calculate target position - scroll to show the new content with some margin
-        const elementRect = firstNewElement.getBoundingClientRect()
-        const targetY = window.pageYOffset + elementRect.top - 100 // 100px margin from top
-        
-        // Smooth scroll to the new content
-        throttledScrollTo(0, Math.max(0, targetY))
-        
-        console.log(`Scrolled to newly loaded content (element ${previousCount + 1} of ${newCount})`)
-        
-        // Verify scroll position after a short delay
-        setTimeout(() => {
-          verifyScrollPosition(firstNewElement, targetY)
-        }, 500)
-      }
-    } else {
-      // Fallback: scroll to bottom to show new content
-      const currentScroll = window.pageYOffset
-      const documentHeight = document.documentElement.scrollHeight
-      const windowHeight = window.innerHeight
-      const maxScroll = documentHeight - windowHeight
-      
-      // Scroll down by a reasonable amount to show new content
-      const scrollTarget = Math.min(maxScroll, currentScroll + windowHeight * 0.7)
-      throttledScrollTo(0, scrollTarget)
-      
-      console.log('Scrolled down to show newly loaded content (fallback method)')
+    if (newCount <= previousCount) {
+      console.log('Blind nudist Extension: No new content to scroll to');
+      return;
     }
+
+    console.log(`Blind nudist Extension: Scrolling to newly loaded content (${previousCount} -> ${newCount})`);
+    
+    // Wait a moment for content to render
+    await sleep(500);
+    
+    // Use the enhanced scroll manager
+    const scrolled = scrollManager.scrollToNewContent(previousCount, newCount);
+    
+    if (!scrolled) {
+      // Fallback: try to find new content elements manually
+      const contentElements = queryElements(SELECTORS.CONTENT_CONTAINERS);
+      
+      if (contentElements.length >= previousCount + 1) {
+        // Find the first newly loaded element (at index previousCount)
+        const firstNewElement = contentElements[previousCount];
+        
+        if (firstNewElement && isElementVisible(firstNewElement)) {
+          console.log('Blind nudist Extension: Scrolling to first new item (fallback)');
+          
+          // Use throttled scroll with smooth behavior
+          throttledScrollIntoView(firstNewElement, {
+            behavior: 'smooth',
+            block: 'start',
+            inline: 'nearest'
+          });
+          
+          return;
+        }
+      }
+      
+      // Ultimate fallback: scroll to content bottom
+      console.log('Blind nudist Extension: Ultimate fallback - scroll to content bottom');
+      scrollManager.scrollToContentBottom({ smooth: true, offset: 100 });
+    }
+    
   } catch (error) {
-    console.warn('Error scrolling to newly loaded content:', error)
+    console.error('Blind nudist Extension: Error scrolling to new content:', error);
   }
 }
 
@@ -824,6 +1112,18 @@ function stopContentExpansion() {
   window.loadMoreActive = false
   notifyProgress('stopped', 0)
 }
+
+// Clean up on page unload
+window.addEventListener('beforeunload', () => {
+  autoDetectionState.stopAutoDetection();
+  autoDetectionState.clearTracking();
+});
+
+// Clean up on navigation
+window.addEventListener('pagehide', () => {
+  autoDetectionState.stopAutoDetection();
+  autoDetectionState.clearTracking();
+});
 
 /**
  * Notifies progress updates with accessibility support via ARIA live regions
@@ -919,6 +1219,137 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// Automatic detection and tracking state
+let autoDetectionState = {
+  trackedElements: new Set(),
+  lastDetectionTime: 0,
+  detectionInterval: null,
+  isTracking: false,
+  
+  // Track a load more element
+  trackElement(element) {
+    if (!element || this.trackedElements.has(element)) return false;
+    
+    try {
+      this.trackedElements.add(element);
+      
+      // Add visual indicator (subtle border)
+      const originalBorder = element.style.border;
+      element.style.border = '1px dashed rgba(59, 130, 246, 0.3)';
+      element.setAttribute('data-bn-tracked', 'true');
+      
+      // Store original border for restoration
+      element.setAttribute('data-bn-original-border', originalBorder);
+      
+      console.log('Blind nudist Extension: Tracking element:', element);
+      return true;
+    } catch (error) {
+      console.error('Blind nudist Extension: Error tracking element:', error);
+      return false;
+    }
+  },
+  
+  // Stop tracking an element
+  untrackElement(element) {
+    if (!element || !this.trackedElements.has(element)) return false;
+    
+    try {
+      this.trackedElements.delete(element);
+      
+      // Restore original styling
+      const originalBorder = element.getAttribute('data-bn-original-border') || '';
+      element.style.border = originalBorder;
+      element.removeAttribute('data-bn-tracked');
+      element.removeAttribute('data-bn-original-border');
+      
+      return true;
+    } catch (error) {
+      console.error('Blind nudist Extension: Error untracking element:', error);
+      return false;
+    }
+  },
+  
+  // Clear all tracked elements
+  clearTracking() {
+    for (const element of this.trackedElements) {
+      this.untrackElement(element);
+    }
+    this.trackedElements.clear();
+  },
+  
+  // Start automatic detection
+  startAutoDetection() {
+    if (this.isTracking) return;
+    
+    this.isTracking = true;
+    this.performDetection();
+    
+    // Set up periodic detection
+    this.detectionInterval = setInterval(() => {
+      this.performDetection();
+    }, 5000); // Check every 5 seconds
+    
+    console.log('Blind nudist Extension: Auto-detection started');
+  },
+  
+  // Stop automatic detection
+  stopAutoDetection() {
+    if (!this.isTracking) return;
+    
+    this.isTracking = false;
+    if (this.detectionInterval) {
+      clearInterval(this.detectionInterval);
+      this.detectionInterval = null;
+    }
+    
+    console.log('Blind nudist Extension: Auto-detection stopped');
+  },
+  
+  // Perform detection and tracking
+  performDetection() {
+    try {
+      const now = Date.now();
+      if (now - this.lastDetectionTime < 2000) return; // Throttle to every 2 seconds
+      
+      this.lastDetectionTime = now;
+      
+      // Detect load more buttons
+      const loadMoreButtons = queryElements(SELECTORS.LOAD_MORE_BUTTONS);
+      const loadMoreLinks = queryElements(SELECTORS.LOAD_MORE_LINKS);
+      const paginationElements = queryElements(SELECTORS.PAGINATION);
+      
+      // Track new elements
+      [...loadMoreButtons, ...loadMoreLinks, ...paginationElements].forEach(element => {
+        if (isElementVisible(element)) {
+          this.trackElement(element);
+        }
+      });
+      
+      // Remove tracking from elements that are no longer visible or valid
+      for (const element of this.trackedElements) {
+        if (!document.contains(element) || !isElementVisible(element)) {
+          this.untrackElement(element);
+        }
+      }
+      
+      // Notify about tracked elements
+      if (this.trackedElements.size > 0) {
+        chrome.runtime.sendMessage({
+          type: 'AUTO_DETECTION_UPDATE',
+          data: {
+            trackedCount: this.trackedElements.size,
+            url: window.location.href,
+            timestamp: now
+          }
+        }).catch(() => {});
+      }
+      
+    } catch (error) {
+      console.error('Blind nudist Extension: Error in auto-detection:', error);
+    }
+  }
+};
+
 // Initialize content script
 console.log('Load More Extension content script loaded')
 
@@ -930,6 +1361,14 @@ if (document.readyState === 'loading') {
       if (scanResult.patterns.buttons.length > 0 || scanResult.patterns.links.length > 0) {
         console.log('Load More Extension: Detected expandable content')
       }
+      
+      // Start automatic detection after a short delay
+      autoDetectionState.startAutoDetection();
     }, 1000)
   })
+} else {
+  // Page already loaded, start detection immediately
+  setTimeout(() => {
+    autoDetectionState.startAutoDetection();
+  }, 500);
 }

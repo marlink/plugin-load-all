@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Load More Expander",
+  "name": "Blind nudist",
   "version": "3.0.0",
   "description": "Automatically expand 'Load More' content on web pages with smart detection and smooth scrolling",
   "permissions": [
@@ -9,7 +9,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Load More Expander"
+    "default_title": "Blind nudist"
   },
   "background": {
     "service_worker": "background.js"

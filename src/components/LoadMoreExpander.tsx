@@ -423,6 +423,25 @@ const LoadMoreExpander: React.FC = () => {
       )}
 
       <div className="w-full max-w-sm mx-auto p-4 space-y-4">
+        {/* Top Buttons - Load Next and Load All */}
+        <div className="flex items-center gap-2 mb-4">
+          <button
+            onClick={handleLoadNext}
+            disabled={!canExpand}
+            className="flex-1 px-3 py-2 bg-gray-900 text-white rounded-lg font-semibold text-xs hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-md"
+          >
+            Load Next
+          </button>
+          <span className="text-xs text-gray-400 font-medium">or</span>
+          <button
+            onClick={handleLoadAll}
+            disabled={!canExpand}
+            className="flex-1 px-3 py-2 bg-blue-500 text-white rounded-lg font-semibold text-xs hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-md"
+          >
+            Load All
+          </button>
+        </div>
+
         <div className="rounded-2xl border border-gray-200 bg-white shadow-xl">
           <div className="p-4 space-y-4">
             {error && (
@@ -521,27 +540,16 @@ const LoadMoreExpander: React.FC = () => {
               </div>
             )}
 
-            {/* Re-analyze */}
-            <div className="flex justify-center pt-2 border-t border-gray-100">
-              <button
-                onClick={analyzePage}
-                disabled={isAnalyzing}
-                className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50 font-medium transition-colors duration-200"
-              >
-                {isAnalyzing ? 'Analyzing...' : '🔄 Re-analyze Page'}
-              </button>
-            </div>
-
-            {/* Bottom Section - Two Column Layout */}
+            {/* Bottom Section - Single Row with SHOW BN and Re-analyze buttons */}
             <div className="pt-4 border-t border-gray-100">
-              <div className="grid grid-cols-2 gap-4">
-                {/* Left Column - Branding */}
+              <div className="flex items-center justify-between gap-2">
+                {/* Left - Logo with enhanced styling */}
                 <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-xl bg-gray-900 flex items-center justify-center">
-                    <span className="text-white text-lg">⚡</span>
+                  <div className="w-8 h-8 rounded-lg bg-orange-500 flex items-center justify-center">
+                    <img src="./icons/icon48.svg" alt="Blind nudist" className="w-5 h-5" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-bold text-gray-900">Load More Expander</h3>
+                    <h3 className="text-sm font-bold text-gray-900">Blind nudist</h3>
                     <p className="text-xs text-gray-600 flex items-center gap-2">
                       <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
                       {stats.pageUrl ? new URL(stats.pageUrl).hostname : 'Analyzing...'}
@@ -552,37 +560,37 @@ const LoadMoreExpander: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Right Column - Controls */}
-                <div className="space-y-2">
+                {/* Right - Buttons */}
+                <div className="flex items-center gap-2">
+                  {/* Re-analyze Page button with minimal width */}
+                  <button
+                    onClick={analyzePage}
+                    disabled={isAnalyzing}
+                    className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50 font-medium transition-colors duration-200 border border-gray-200 rounded"
+                    style={{width: 'auto', minWidth: '0'}}
+                  >
+                    {isAnalyzing ? '...' : '🔄'}
+                  </button>
+                  
+                  {/* SHOW BN button */}
+                  {!progress.isLoading && (
+                    <button
+                      onClick={handleLoadNext}
+                      disabled={!stats.detectedButtons && !stats.detectedLinks}
+                      className="px-4 py-2 bg-blue-500 text-white rounded-lg font-semibold text-xs hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors duration-200 shadow-md"
+                    >
+                      SHOW BN
+                    </button>
+                  )}
+                  
                   {/* Stop button when loading */}
                   {progress.isLoading && (
                     <button
                       onClick={handleStop}
-                      className="w-full px-3 py-2 bg-red-500 text-white rounded-lg font-semibold text-xs hover:bg-red-600 transition-colors duration-200 shadow-md"
+                      className="px-4 py-2 bg-red-500 text-white rounded-lg font-semibold text-xs hover:bg-red-600 transition-colors duration-200 shadow-md"
                     >
-                      🛑 Stop Loading
+                      🛑 Stop
                     </button>
-                  )}
-                  
-                  {/* Load buttons with "or" separator */}
-                  {!progress.isLoading && (
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={handleLoadNext}
-                        disabled={!canExpand}
-                        className="flex-1 px-3 py-2 bg-gray-900 text-white rounded-lg font-semibold text-xs hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-md"
-                      >
-                        Load Next
-                      </button>
-                      <span className="text-xs text-gray-400 font-medium">or</span>
-                      <button
-                        onClick={handleLoadAll}
-                        disabled={!canExpand}
-                        className="flex-1 px-3 py-2 bg-blue-500 text-white rounded-lg font-semibold text-xs hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-md"
-                      >
-                        Load All
-                      </button>
-                    </div>
                   )}
                 </div>
               </div>
