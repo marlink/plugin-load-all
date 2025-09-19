@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Load More Expander",
+  "version": "3.0.1",
+  "description": "Automatically detect and expand 'Load More' content on web pages with smart detection and safe loading.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Load More Expander",
+    "default_icon": {
+      "16": "icons/icon16.svg",
+      "32": "icons/icon32.svg",
+      "48": "icons/icon48.svg",
+      "128": "icons/icon128.svg"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.svg",
+    "32": "icons/icon32.svg",
+    "48": "icons/icon48.svg",
+    "128": "icons/icon128.svg"
+  },
+  "web_accessible_resources": [],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';"
+  }
+}
