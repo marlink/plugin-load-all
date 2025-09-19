@@ -1,216 +1,490 @@
 // Content script for Load More Extension
 // Runs in the context of web pages to detect and interact with content
 
-// Initialize security utilities
-const security = new SecurityUtils();
+// Import modular components
+import { queryElements, throttle } from './modules/utils.js';
+import { SELECTORS } from './modules/selectors.js';
+import { 
+  analyzePageContent, 
+  isElementVisible, 
+  generateElementSelector 
+} from './modules/detection.js';
+import { 
+  executeLoadMore, 
+  clickElement, 
+  expandHiddenContent 
+} from './modules/execution.js';
 
-// Listen for messages from popup with security validation
+// Throttled scroll functions for performance
+const throttledScrollTo = throttle((x, y) => {
+  window.scrollTo(x, y);
+}, 100); // 100ms throttle for scroll operations
+
+const throttledScrollIntoView = throttle((element, options) => {
+  element.scrollIntoView(options);
+}, 150); // 150ms throttle for scrollIntoView
+
+// queryElements function is now imported from utils module
+
+// Cache for page analysis results
+const pageAnalysisCache = {
+  data: null,
+  timestamp: 0,
+  url: '',
+  domHash: '',
+  
+  // Cache validity: 30 seconds or until DOM changes significantly
+  isValid() {
+    const now = Date.now();
+    const currentUrl = window.location.href;
+    const currentDomHash = this.generateDomHash();
+    
+    return this.data && 
+           (now - this.timestamp < 30000) && 
+           this.url === currentUrl &&
+           this.domHash === currentDomHash;
+  },
+  
+  // Generate a simple hash of key DOM elements for change detection
+  generateDomHash() {
+    const keyElements = queryElements(SELECTORS.CACHE_KEY_ELEMENTS);
+    return keyElements.length.toString() + document.body.children.length.toString();
+  },
+  
+  set(data) {
+    this.data = data;
+    this.timestamp = Date.now();
+    this.url = window.location.href;
+    this.domHash = this.generateDomHash();
+  },
+  
+  get() {
+    return this.isValid() ? this.data : null;
+  },
+  
+  clear() {
+    this.data = null;
+    this.timestamp = 0;
+    this.url = '';
+    this.domHash = '';
+  }
+};
+
+// Global error handler for uncaught exceptions
+window.addEventListener('error', (event) => {
+  console.error('Load More Extension - Uncaught error:', event.error);
+});
+
+// Auto-scroll to load more buttons when page loads
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(scrollToLoadMoreButton, 1000); // Delay to ensure page is fully loaded
+});
+
+// Also handle when page is fully loaded (for cases where DOMContentLoaded already fired)
+window.addEventListener('load', () => {
+  setTimeout(scrollToLoadMoreButton, 1500); // Slightly longer delay for full page load
+});
+
+// Set up mutation observer to detect dynamically loaded content
+const setupMutationObserver = () => {
+  // Create a throttled version of scrollToLoadMoreButton for the observer
+  const throttledCheckForNewButtons = throttle(() => {
+    // Only check if we haven't already found and scrolled to a button
+    if (!window.loadMoreButtonFound) {
+      const pageAnalysis = scanPageContent();
+      if (pageAnalysis.patterns.buttons.length > 0 || pageAnalysis.patterns.links.length > 0) {
+        scrollToLoadMoreButton();
+      }
+    }
+  }, 1000);
+
+  // Create mutation observer
+  const observer = new MutationObserver((mutations) => {
+    let shouldCheck = false;
+    
+    // Check if any mutations are relevant (added nodes)
+    for (const mutation of mutations) {
+      if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+        shouldCheck = true;
+        break;
+      }
+    }
+    
+    if (shouldCheck) {
+      throttledCheckForNewButtons();
+    }
+  });
+  
+  // Start observing with a configuration
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: false,
+    characterData: false
+  });
+  
+  return observer;
+};
+
+// Initialize mutation observer after page load
+window.addEventListener('load', () => {
+  // Set a flag to track if we've found a button
+  window.loadMoreButtonFound = false;
+  
+  // Setup the observer with a slight delay
+  setTimeout(() => {
+    const observer = setupMutationObserver();
+    
+    // Disconnect after 30 seconds to avoid performance impact
+    setTimeout(() => {
+      observer.disconnect();
+      console.log('Load More Extension: Disconnected mutation observer after timeout');
+    }, 30000);
+  }, 2000);
+});
+
+// Function to automatically scroll to the first load more button
+function scrollToLoadMoreButton(retryCount = 0) {
+  const maxRetries = 5
+  const retryDelay = 500
+  
+  const loadMoreSelectors = [
+    'button[class*="load"], button[class*="more"], button[class*="show"]',
+    'a[class*="load"], a[class*="more"], a[class*="show"]',
+    '[class*="load-more"], [class*="show-more"], [class*="view-more"]',
+    '.pagination a, .pager a',
+    '[data-testid*="load"], [data-testid*="more"]',
+    'button:contains("Load"), button:contains("More"), button:contains("Show")',
+    'a:contains("Load"), a:contains("More"), a:contains("Show")'
+  ]
+  
+  let targetElement = null
+  
+  // Find the best target element
+  for (const selector of loadMoreSelectors) {
+    try {
+      const elements = document.querySelectorAll(selector)
+      if (elements.length > 0) {
+        // Find the first visible or below-viewport element
+        for (const element of elements) {
+          const rect = element.getBoundingClientRect()
+          const isVisible = rect.width > 0 && rect.height > 0
+          const isInOrBelowViewport = rect.top >= -100 // Allow some margin above viewport
+          
+          if (isVisible && isInOrBelowViewport) {
+            targetElement = element
+            break
+          }
+        }
+        if (targetElement) break
+      }
+    } catch (e) {
+      // Skip invalid selectors (like :contains which isn't valid CSS)
+      continue
+    }
+  }
+  
+  if (targetElement) {
+    // Calculate position to place button at top of viewport with margin
+    const rect = targetElement.getBoundingClientRect()
+    const scrollTop = window.pageYOffset || document.documentElement.scrollTop
+    const targetY = scrollTop + rect.top - 80 // 80px margin from top
+    
+    // Use throttled smooth scrolling
+    throttledScroll(() => {
+      window.scrollTo({
+        top: Math.max(0, targetY),
+        behavior: 'smooth'
+      })
+    })
+    
+    // Add visual highlight
+    const originalStyle = targetElement.style.cssText
+    const originalTransition = targetElement.style.transition
+    
+    targetElement.style.transition = 'all 300ms ease'
+    targetElement.style.boxShadow = '0 0 0 3px #3B82F6, 0 0 20px rgba(59, 130, 246, 0.3)'
+    targetElement.style.transform = 'scale(1.02)'
+    
+    setTimeout(() => {
+      targetElement.style.transition = originalTransition
+      targetElement.style.boxShadow = ''
+      targetElement.style.transform = ''
+      setTimeout(() => {
+        targetElement.style.cssText = originalStyle
+      }, 300)
+    }, 500)
+    
+    // Verify scroll position after a delay
+    setTimeout(() => {
+      verifyScrollPosition(targetElement, targetY)
+    }, 1000)
+    
+    return true
+  } else if (retryCount < maxRetries) {
+    // Retry after delay if no element found
+    setTimeout(() => {
+      scrollToLoadMoreButton(retryCount + 1)
+    }, retryDelay)
+    return false
+  }
+  
+  return false
+}
+
+try {
+  // Maximum retry attempts
+  const MAX_RETRIES = 3;
+  
+  // Scan page for load more buttons
+  const pageAnalysis = scanPageContent();
+  let targetElement = null;
+  let elementType = '';
+  
+  // Check if we have load more buttons
+  if (pageAnalysis.patterns.buttons.length > 0) {
+    targetElement = document.querySelector(pageAnalysis.patterns.buttons[0].selector);
+    elementType = 'button';
+  } else if (pageAnalysis.patterns.links.length > 0) {
+    // Try links if no buttons found
+    targetElement = document.querySelector(pageAnalysis.patterns.links[0].selector);
+    elementType = 'link';
+  }
+  
+  if (targetElement && isElementVisible(targetElement)) {
+    // Scroll to the element with smooth behavior
+    try {
+      throttledScrollIntoView(targetElement, { 
+        behavior: 'smooth', 
+        block: 'center'
+      });
+      console.log(`Load More Extension: Auto-scrolled to load more ${elementType}`);
+      
+      // Mark that we've found a button
+      window.loadMoreButtonFound = true;
+      
+      // Verify scroll position after a short delay
+      setTimeout(() => {
+        verifyScrollPosition(targetElement);
+      }, 500);
+    } catch (scrollError) {
+      console.error('Load More Extension: Error during scroll operation:', scrollError);
+      // Fallback to window.scrollTo if scrollIntoView fails
+      const rect = targetElement.getBoundingClientRect();
+      const scrollY = window.scrollY + rect.top - (window.innerHeight / 2);
+      throttledScrollTo(0, scrollY);
+      console.log('Load More Extension: Used fallback scroll method');
+    }
+  } else {
+    console.log(`Load More Extension: Load more element not visible or not found (attempt ${retryCount + 1})`);
+    
+    // Retry with increasing delay if element not found and under max retries
+    if (retryCount < MAX_RETRIES) {
+      const nextRetryDelay = 1000 * (retryCount + 1); // Increasing delay: 1s, 2s, 3s
+      console.log(`Load More Extension: Will retry in ${nextRetryDelay}ms`);
+      setTimeout(() => {
+        scrollToLoadMoreButton(retryCount + 1);
+      }, nextRetryDelay);
+    } else {
+      console.log('Load More Extension: Maximum retry attempts reached');
+    }
+  }
+} catch (error) {
+  console.error('Load More Extension: Error during auto-scroll:', error);
+}
+
+// Verify that the element is actually visible in the viewport after scrolling
+function verifyScrollPosition(element, targetY = null) {
+  if (!element) return;
+  
+  try {
+    const rect = element.getBoundingClientRect();
+    const currentScrollTop = window.pageYOffset || document.documentElement.scrollTop;
+    
+    // Check if element is positioned correctly at top of viewport (with 80px margin)
+    const isCorrectlyPositioned = targetY ? 
+      Math.abs(currentScrollTop - targetY) < 50 : // Allow 50px tolerance
+      (rect.top >= 60 && rect.top <= 120); // Element should be 60-120px from top
+    
+    if (!isCorrectlyPositioned) {
+      console.log('Load More Extension: Element not correctly positioned, adjusting...');
+      
+      // Calculate correct position
+      const correctY = targetY || (currentScrollTop + rect.top - 80);
+      
+      // Smooth scroll to correct position
+      window.scrollTo({
+        top: Math.max(0, correctY),
+        behavior: 'smooth'
+      });
+      
+      console.log(`Load More Extension: Adjusted scroll position to ${correctY}px`);
+    } else {
+      console.log('Load More Extension: Element correctly positioned at top of viewport');
+    }
+  } catch (error) {
+    console.error('Load More Extension: Error verifying scroll position:', error);
+  }
+}
+
+// Keyboard navigation support for accessibility
+document.addEventListener('keydown', (event) => {
+  // Alt + L: Start load more expansion
+  if (event.altKey && event.key.toLowerCase() === 'l' && !window.loadMoreActive) {
+    event.preventDefault()
+    startContentExpansion({ method: 'auto' })
+    notifyProgress('started', 0, 'Keyboard shortcut activated')
+  }
+  
+  // Alt + S: Stop expansion
+  if (event.altKey && event.key.toLowerCase() === 's' && window.loadMoreActive) {
+    event.preventDefault()
+    stopContentExpansion()
+    notifyProgress('stopped', 0, 'Stopped via keyboard shortcut')
+  }
+})
+
+// Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    // Validate message structure and content
-    const validation = security.validateMessage(message);
-    if (!validation.valid) {
-      console.error('Invalid message:', validation.error);
-      sendResponse({ error: validation.error });
-      return;
-    }
-
-    // Rate limiting check
-    const rateCheck = security.checkRateLimit(sender.tab?.id || 'unknown');
-    if (!rateCheck.allowed) {
-      console.error('Rate limit exceeded');
-      sendResponse({ error: rateCheck.error });
+    if (!message || typeof message.type !== 'string') {
+      sendResponse({ error: 'Invalid message format' });
       return;
     }
 
     switch (message.type) {
       case 'SCAN_PAGE_CONTENT':
-        sendResponse(scanPageContent());
-        break;
+        try {
+          const result = scanPageContent();
+          sendResponse({ success: true, data: result });
+        } catch (error) {
+          console.error('Error scanning page content:', error);
+          sendResponse({ error: 'Failed to scan page content', details: error.message });
+        }
+        break
         
       case 'START_EXPANSION':
-        if (message.options && typeof message.options === 'object') {
-          startContentExpansion(message.options);
+        try {
+          startContentExpansion(message.options || {});
           sendResponse({ success: true });
-        } else {
-          sendResponse({ error: 'Invalid expansion options' });
+        } catch (error) {
+          console.error('Error starting content expansion:', error);
+          sendResponse({ error: 'Failed to start content expansion', details: error.message });
         }
-        break;
+        break
         
       case 'STOP_EXPANSION':
-        stopContentExpansion();
-        sendResponse({ success: true });
-        break;
+        try {
+          stopContentExpansion();
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error('Error stopping content expansion:', error);
+          sendResponse({ error: 'Failed to stop content expansion', details: error.message });
+        }
+        break
         
       default:
-        sendResponse({ error: 'Unknown message type' });
+        sendResponse({ error: 'Unknown message type', type: message.type });
     }
   } catch (error) {
-    console.error('Message handling error:', error);
-    sendResponse({ error: 'Internal error processing message' });
+    console.error('Error in message listener:', error);
+    sendResponse({ error: 'Internal error processing message', details: error.message });
   }
-});
+})
 
+/**
+ * Scans the current page for load more patterns and content expansion opportunities
+ * 
+ * This function performs comprehensive analysis of the page to detect:
+ * - Load more buttons and links with various text patterns
+ * - Infinite scroll capabilities based on page height
+ * - Pagination elements and navigation
+ * - Lazy-loaded images and hidden content
+ * 
+ * @returns {Object} Analysis results containing:
+ *   - patterns: Detected UI patterns (buttons, links, infiniteScroll, etc.)
+ *   - pageInfo: Basic page metadata (URL, title, dimensions)
+ *   - detectionSummary: Summary of findings and recommended expansion method
+ * 
+ * @throws {Error} When DOM access fails or page analysis encounters critical errors
+ */
 function scanPageContent() {
-  // Enhanced detection for various "Load More" patterns
-  const patterns = {
-    buttons: [],
-    links: [],
-    infiniteScroll: false,
-    pagination: false,
-    lazyLoad: false,
-    hiddenContent: []
-  }
-
-  // Text-based detection (case insensitive)
-  const loadMoreTexts = [
-    'load more', 'show more', 'view more', 'see more', 'read more',
-    'load additional', 'show additional', 'view additional',
-    'more results', 'more items', 'more posts', 'more content',
-    'continue reading', 'expand', 'next page', 'load next',
-    'show all', 'view all', 'display more', 'reveal more',
-    'load comments', 'show comments', 'view replies', 'show replies'
-  ]
-
-  // Find buttons and links with load more text using secure queries
-  const clickableElements = security.secureQuerySelectorAll('button, a, [role="button"], [data-action], [data-load-more], [data-toggle], [data-expand], .load-more, .show-more, .view-more, .expand')
+  try {
+    // Check cache first
+    const cachedResult = pageAnalysisCache.get();
+    if (cachedResult) {
+      console.log('Load More Extension: Using cached page analysis');
+      return cachedResult;
+    }
+    
+    // Use the imported analyzePageContent function for actual analysis
+    const patterns = analyzePageContent();
+    
+    // Count content items for additional metadata
+    const contentElements = queryElements(SELECTORS.CONTENT_CONTAINERS);
+    const maxContentCount = contentElements.length;
+    
+    // Get page dimensions
+    const scrollHeight = document.documentElement.scrollHeight;
+    const clientHeight = document.documentElement.clientHeight;
   
-  clickableElements.forEach(element => {
-    const text = element.textContent?.toLowerCase().trim() || ''
-    const ariaLabel = element.getAttribute('aria-label')?.toLowerCase() || ''
-    const title = element.getAttribute('title')?.toLowerCase() || ''
-    const className = element.className?.toLowerCase() || ''
-    const id = element.id?.toLowerCase() || ''
-    const dataAttributes = Array.from(element.attributes)
-      .filter(attr => attr.name.startsWith('data-'))
-      .map(attr => `${attr.name}=${attr.value}`)
-      .join(' ')
-      .toLowerCase()
-    
-    const allText = `${text} ${ariaLabel} ${title} ${className} ${id} ${dataAttributes}`
-    
-    // Check for load more patterns
-    const matchesLoadMore = loadMoreTexts.some(pattern => allText.includes(pattern))
-    
-    // Check for icon-only buttons (no text but has icon class)
-    const hasIconClass = className.includes('icon') || 
-                         className.includes('arrow') || 
-                         className.includes('chevron') ||
-                         className.includes('plus') ||
-                         className.includes('expand')
-    
-    // Check for buttons with only + or ↓ symbols
-    const hasExpandSymbol = text === '+' || 
-                           text === '↓' || 
-                           text === '⌄' || 
-                           text === '▼' ||
-                           text === '...' ||
-                           text === '…'
-    
-    if (matchesLoadMore || (hasIconClass && element.children.length < 3) || hasExpandSymbol) {
-      const elementInfo = {
-        tagName: element.tagName,
-        text: text.substring(0, 50),
-        className: element.className,
-        id: element.id,
-        visible: isElementVisible(element),
-        selector: generateSelector(element),
-        confidence: calculateConfidence(element, matchesLoadMore, hasIconClass, hasExpandSymbol)
-      }
-      
-      if (element.tagName === 'BUTTON' || element.getAttribute('role') === 'button') {
-        patterns.buttons.push(elementInfo)
-      } else {
-        patterns.links.push(elementInfo)
+    const result = {
+      patterns,
+      contentCount: maxContentCount,
+      estimatedTotal: Math.max(maxContentCount * 2, 50),
+      pageInfo: {
+        url: window.location.href,
+        title: document.title,
+        scrollHeight,
+        clientHeight
+      },
+      detectionSummary: {
+        hasLoadMoreButtons: patterns.buttons.length > 0,
+        hasLoadMoreLinks: patterns.links.length > 0,
+        hasInfiniteScroll: patterns.infiniteScroll,
+        hasPagination: patterns.pagination,
+        hasLazyLoadedImages: patterns.lazyLoad,
+        hasHiddenContent: patterns.hiddenContent.length > 0,
+        recommendedMethod: determineRecommendedMethod(patterns)
       }
     }
-  })
-
-  // Check for infinite scroll indicators
-  const scrollHeight = document.documentElement.scrollHeight
-  const clientHeight = document.documentElement.clientHeight
-  patterns.infiniteScroll = scrollHeight > clientHeight * 1.5
-
-  // Check for pagination using secure queries
-  const paginationSelectors = [
-    '.pagination', '.pager', '.page-nav', '.pages', '.page-numbers',
-    'nav.navigation', 'ul.pages'
-  ]
-  
-  patterns.pagination = paginationSelectors.some(selector => {
-    try {
-      return security.secureQuerySelector(selector) !== null;
-    } catch {
-      return false;
-    }
-  })
-  
-  // Detect lazy-loaded images using secure queries
-  const lazyLoadedImages = security.secureQuerySelectorAll('img[loading="lazy"], img[data-src], img[data-lazy], img[data-lazy-src], [data-lazy-load], [data-lazyload]')
-  patterns.lazyLoad = lazyLoadedImages.length > 0
-  
-  // Detect hidden content sections using secure queries
-  const hiddenContentSelectors = [
-    '.hidden', '.collapse:not(.show)', '[aria-hidden="true"]', 
-    '.accordion-content:not(.active)', '.tab-content:not(.active)',
-    '[data-hidden="true"]', '[data-collapsed="true"]'
-  ]
-  
-  hiddenContentSelectors.forEach(selector => {
-    try {
-      const elements = security.secureQuerySelectorAll(selector);
-      if (elements.length > 0) {
-        patterns.hiddenContent.push({
-          selector: security.sanitizeText(selector),
-          count: elements.length
-        });
-      }
-    } catch (error) {
-      console.warn('Skipped invalid selector:', selector);
-    }
-  })
-
-  // Count content items using secure queries
-  const contentSelectors = [
-    'article', '.post', '.item', '.card', '.entry', '.result', '.row', '.tile'
-  ]
-  
-  let maxContentCount = 0
-  contentSelectors.forEach(selector => {
-    try {
-      const count = security.secureQuerySelectorAll(selector).length;
-      maxContentCount = Math.max(maxContentCount, count);
-    } catch (error) {
-      console.warn('Skipped invalid content selector:', selector);
-    }
-  })
-
-  // Sort buttons and links by confidence
-  patterns.buttons.sort((a, b) => b.confidence - a.confidence);
-  patterns.links.sort((a, b) => b.confidence - a.confidence);
-  
-  return {
-    patterns,
-    contentCount: maxContentCount,
-    estimatedTotal: Math.max(maxContentCount * 2, 50),
-    pageInfo: {
-      url: window.location.href,
-      title: document.title,
-      scrollHeight,
-      clientHeight
-    },
-    detectionSummary: {
-      hasLoadMoreButtons: patterns.buttons.length > 0,
-      hasLoadMoreLinks: patterns.links.length > 0,
-      hasInfiniteScroll: patterns.infiniteScroll,
-      hasPagination: patterns.pagination,
-      hasLazyLoadedImages: patterns.lazyLoad,
-      hasHiddenContent: patterns.hiddenContent.length > 0,
-      recommendedMethod: determineRecommendedMethod(patterns)
+    
+    // Cache the result for future use
+    pageAnalysisCache.set(result);
+    
+    return result;
+  } catch (error) {
+    console.error('Error in scanPageContent:', error);
+    // Return minimal safe response on error
+    return {
+      patterns: { buttons: [], links: [], infiniteScroll: false, pagination: false, lazyLoad: false, hiddenContent: [] },
+      contentCount: 0,
+      estimatedTotal: 0,
+      pageInfo: { url: window.location.href, title: document.title, scrollHeight: 0, clientHeight: 0 },
+      detectionSummary: { hasLoadMoreButtons: false, hasLoadMoreLinks: false, hasInfiniteScroll: false, hasPagination: false, hasLazyLoadedImages: false, hasHiddenContent: false, recommendedMethod: 'none' },
+      error: error.message
     }
   }
 }
 
+/**
+ * Analyzes detected patterns to recommend the optimal content expansion method
+ * 
+ * Priority order:
+ * 1. Infinite scroll (if detected and reliable)
+ * 2. High-confidence load more buttons
+ * 3. Lazy-loaded images (scroll method)
+ * 4. Pagination links
+ * 5. Hidden content expansion
+ * 
+ * @param {Object} patterns - Detected page patterns from scanPageContent
+ * @param {Array} patterns.buttons - Detected load more buttons with confidence scores
+ * @param {Array} patterns.links - Detected load more links
+ * @param {boolean} patterns.infiniteScroll - Whether infinite scroll is detected
+ * @param {boolean} patterns.lazyLoad - Whether lazy-loaded content is present
+ * 
+ * @returns {string} Recommended method: 'click', 'scroll', 'expand', or 'none'
+ */
 function determineRecommendedMethod(patterns) {
   // Determine the best method to expand content based on detected patterns
   
@@ -248,116 +522,56 @@ function determineRecommendedMethod(patterns) {
   return 'auto';
 }
 
-function isElementVisible(element) {
-  if (!element) return false;
-  
-  // Check if element or any parent has display:none or visibility:hidden
-  const style = window.getComputedStyle(element);
-  if (style.display === 'none' || style.visibility === 'hidden') return false;
-  
-  // Check if element has zero dimensions and no background
-  const rect = element.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return false;
-  
-  // Check if element is within viewport or reasonably close
-  const viewportHeight = window.innerHeight;
-  if (rect.bottom < -100 || rect.top > viewportHeight + 500) return false;
-  
-  // Check if element has opacity 0
-  if (parseFloat(style.opacity) === 0) return false;
-  
-  // Check if element is covered by another element
-  const centerX = rect.left + rect.width / 2;
-  const centerY = rect.top + rect.height / 2;
-  const elementAtPoint = document.elementFromPoint(centerX, centerY);
-  if (elementAtPoint && !element.contains(elementAtPoint) && !elementAtPoint.contains(element)) {
-    // Element is covered by another element
-    return false;
-  }
-  
-  return true;
-}
+// isElementVisible, calculateElementConfidence, and generateElementSelector functions are now imported from detection module
 
-function calculateConfidence(element, matchesLoadMore, hasIconClass, hasExpandSymbol) {
-  let confidence = 0;
-  
-  // Text-based confidence
-  if (matchesLoadMore) confidence += 40;
-  
-  // Visual indicators
-  if (hasIconClass) confidence += 15;
-  if (hasExpandSymbol) confidence += 20;
-  
-  // Position-based confidence (elements at the bottom of content areas)
-  const rect = element.getBoundingClientRect();
-  const viewportHeight = window.innerHeight;
-  if (rect.top > viewportHeight * 0.7) confidence += 10;
-  
-  // Interaction hints
-  if (element.tagName === 'BUTTON' || element.getAttribute('role') === 'button') confidence += 15;
-  if (element.getAttribute('aria-expanded') === 'false') confidence += 20;
-  if (element.getAttribute('aria-controls')) confidence += 15;
-  
-  // Data attributes that suggest expandability
-  if (element.hasAttribute('data-load-more') || 
-      element.hasAttribute('data-toggle') || 
-      element.hasAttribute('data-expand')) {
-    confidence += 25;
-  }
-  
-  return Math.min(confidence, 100); // Cap at 100%
-}
-
-function generateSelector(element) {
-  // Generate a unique selector for the element
-  if (element.id) {
-    return `#${element.id}`
-  }
-  
-  if (element.className) {
-    const classes = element.className.split(' ').filter(c => c.length > 0)
-    if (classes.length > 0) {
-      return `${element.tagName.toLowerCase()}.${classes.join('.')}`
-    }
-  }
-  
-  // Check for data attributes that might be useful
-  const dataAttrs = Array.from(element.attributes)
-    .filter(attr => attr.name.startsWith('data-') && attr.value)
-    .map(attr => `[${attr.name}="${attr.value}"]`);
-    
-  if (dataAttrs.length > 0) {
-    return `${element.tagName.toLowerCase()}${dataAttrs[0]}`;
-  }
-  
-  // Fallback to tag name with text content
-  const text = element.textContent?.trim().substring(0, 20)
-  return `${element.tagName.toLowerCase()}:contains("${text}")`
-}
-
+/**
+ * Initiates automated content expansion using detected patterns and user preferences
+ * 
+ * This function orchestrates the content expansion process by:
+ * - Setting up global state and expansion parameters
+ * - Analyzing the page for optimal expansion methods
+ * - Executing expansion cycles with progress tracking
+ * - Handling different expansion methods (click, scroll, expand)
+ * 
+ * @param {Object} options - Configuration options for expansion
+ * @param {string} [options.method='auto'] - Expansion method: 'auto', 'click', 'scroll', 'expand'
+ * @param {number} [options.maxClicks=10] - Maximum number of expansion attempts
+ * @param {number} [options.delay=2000] - Delay between expansion attempts (ms)
+ * @param {boolean} [options.stopOnError=false] - Whether to stop on first error
+ * 
+ * @throws {Error} When expansion setup fails or critical errors occur during execution
+ */
 function startContentExpansion(options = {}) {
-  const { maxClicks = 10, delay = 2000, method = 'auto' } = options
-  
-  // Set global flags
-  window.loadMoreActive = true
-  window.loadMoreStopped = false
-  
-  let clickCount = 0
-  let lastContentCount = getCurrentContentCount()
-  
-  // Get page patterns for smarter expansion
-  const pageAnalysis = scanPageContent()
-  const recommendedMethod = pageAnalysis.detectionSummary.recommendedMethod
-  
-  // Use recommended method if auto is selected
-  const expansionMethod = method === 'auto' ? recommendedMethod : method
-  
-  async function performExpansion() {
-    if (window.loadMoreStopped || clickCount >= maxClicks) {
-      window.loadMoreActive = false
-      notifyProgress('complete', clickCount)
-      return
-    }
+  try {
+    const { maxClicks = 10, delay = 2000, method = 'auto' } = options
+    
+    // Set global flags
+    window.loadMoreActive = true
+    window.loadMoreStopped = false
+    
+    let clickCount = 0
+    let lastContentCount = getCurrentContentCount()
+    
+    // Get page patterns for smarter expansion
+    const pageAnalysis = scanPageContent()
+    const recommendedMethod = pageAnalysis.detectionSummary.recommendedMethod
+    
+    // Use recommended method if auto is selected
+    const expansionMethod = method === 'auto' ? recommendedMethod : method
+    
+    async function performExpansion() {
+      try {
+        if (window.loadMoreStopped || clickCount >= maxClicks) {
+          window.loadMoreActive = false
+          notifyProgress('complete', clickCount)
+          return
+        }
+      } catch (error) {
+        console.error('Error in performExpansion:', error);
+        window.loadMoreActive = false
+        notifyProgress('error', clickCount, error.message)
+        return
+      }
 
     let actionTaken = false
     
@@ -370,8 +584,8 @@ function startContentExpansion(options = {}) {
       const loadMoreButton = findBestLoadMoreButton()
       if (loadMoreButton && isElementVisible(loadMoreButton)) {
         try {
-          // Scroll button into view
-          loadMoreButton.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          // Scroll button into view (throttled)
+          throttledScrollIntoView(loadMoreButton, { behavior: 'smooth', block: 'center' })
           await sleep(500)
           
           // Click the button
@@ -393,18 +607,39 @@ function startContentExpansion(options = {}) {
       const maxScroll = document.documentElement.scrollHeight - window.innerHeight
       
       if (currentScroll < maxScroll * 0.9) {
-        window.scrollTo(0, document.documentElement.scrollHeight)
+        // Store current content count before scrolling
+        const preScrollContentCount = getCurrentContentCount()
+        
+        throttledScrollTo(0, document.documentElement.scrollHeight)
         actionTaken = true
         notifyProgress('scrolled', clickCount)
+        
+        // Wait for potential lazy loading, then check for new content
+        await sleep(delay)
+        const postScrollContentCount = getCurrentContentCount()
+        
+        if (postScrollContentCount > preScrollContentCount) {
+          // New content was loaded, scroll to show it
+          await scrollToNewlyLoadedContent(preScrollContentCount, postScrollContentCount)
+        }
       }
     }
     
     // Method 3: Expand hidden content
     if (!actionTaken && (expansionMethod === 'auto' || expansionMethod === 'expand')) {
+      const preExpandContentCount = getCurrentContentCount()
       const expandedCount = expandHiddenContent()
       if (expandedCount > 0) {
         actionTaken = true
         notifyProgress('expanded', clickCount, `${expandedCount} hidden elements`)
+        
+        // Wait for content to render, then scroll to newly visible content
+        await sleep(300)
+        const postExpandContentCount = getCurrentContentCount()
+        
+        if (postExpandContentCount > preExpandContentCount) {
+          await scrollToNewlyLoadedContent(preExpandContentCount, postExpandContentCount)
+        }
       }
     }
     
@@ -433,6 +668,9 @@ function startContentExpansion(options = {}) {
       if (newContentCount > lastContentCount) {
         lastContentCount = newContentCount
         notifyProgress('loaded', clickCount, `${newContentCount} items`)
+        
+        // Scroll to newly loaded content
+        await scrollToNewlyLoadedContent(currentContentCount, newContentCount)
       }
       
       // Continue expansion
@@ -444,9 +682,65 @@ function startContentExpansion(options = {}) {
       window.loadMoreActive = false
       notifyProgress('complete', clickCount)
     }
+    }
+    
+    performExpansion()
+  } catch (error) {
+    console.error('Error in startContentExpansion:', error);
+    window.loadMoreActive = false
+    window.loadMoreStopped = true
+    notifyProgress('error', 0, error.message)
   }
-  
-  performExpansion()
+}
+
+/**
+ * Scrolls to newly loaded content after successful expansion
+ * @param {number} previousCount - Content count before expansion
+ * @param {number} newCount - Content count after expansion
+ */
+async function scrollToNewlyLoadedContent(previousCount, newCount) {
+  try {
+    // Wait a moment for content to fully render
+    await sleep(300)
+    
+    // Get all content elements
+    const contentElements = queryElements(SELECTORS.CONTENT_CONTAINERS)
+    
+    if (contentElements.length >= previousCount + 1) {
+      // Find the first newly loaded element (at index previousCount)
+      const firstNewElement = contentElements[previousCount]
+      
+      if (firstNewElement && isElementVisible(firstNewElement)) {
+        // Calculate target position - scroll to show the new content with some margin
+        const elementRect = firstNewElement.getBoundingClientRect()
+        const targetY = window.pageYOffset + elementRect.top - 100 // 100px margin from top
+        
+        // Smooth scroll to the new content
+        throttledScrollTo(0, Math.max(0, targetY))
+        
+        console.log(`Scrolled to newly loaded content (element ${previousCount + 1} of ${newCount})`)
+        
+        // Verify scroll position after a short delay
+        setTimeout(() => {
+          verifyScrollPosition(firstNewElement, targetY)
+        }, 500)
+      }
+    } else {
+      // Fallback: scroll to bottom to show new content
+      const currentScroll = window.pageYOffset
+      const documentHeight = document.documentElement.scrollHeight
+      const windowHeight = window.innerHeight
+      const maxScroll = documentHeight - windowHeight
+      
+      // Scroll down by a reasonable amount to show new content
+      const scrollTarget = Math.min(maxScroll, currentScroll + windowHeight * 0.7)
+      throttledScrollTo(0, scrollTarget)
+      
+      console.log('Scrolled down to show newly loaded content (fallback method)')
+    }
+  } catch (error) {
+    console.warn('Error scrolling to newly loaded content:', error)
+  }
 }
 
 function findBestLoadMoreButton() {
@@ -460,7 +754,7 @@ function findBestLoadMoreButton() {
     
     for (const buttonInfo of highConfidenceButtons) {
       try {
-        const element = document.querySelector(buttonInfo.selector);
+        const element = queryElements(buttonInfo.selector, document, true);
         if (element && isElementVisible(element)) {
           return element;
         }
@@ -476,7 +770,7 @@ function findBestLoadMoreButton() {
     
     for (const linkInfo of highConfidenceLinks) {
       try {
-        const element = document.querySelector(linkInfo.selector);
+        const element = queryElements(linkInfo.selector, document, true);
         if (element && isElementVisible(element)) {
           return element;
         }
@@ -521,32 +815,23 @@ function findBestLoadMoreButton() {
 }
 
 function getCurrentContentCount() {
-  const contentSelectors = [
-    'article', '.post', '.item', '.card', '.entry', '.result',
-    '[class*="post"]', '[class*="item"]', '[class*="card"]'
-  ]
-  
-  let maxCount = 0
-  contentSelectors.forEach(selector => {
-    const count = document.querySelectorAll(selector).length
-    maxCount = Math.max(maxCount, count)
-  })
-  
-  return maxCount || document.querySelectorAll('*').length
+  const contentElements = queryElements(SELECTORS.CONTENT_CONTAINERS)
+  return contentElements.length || queryElements(SELECTORS.ALL_ELEMENTS).length
 }
 
 function stopContentExpansion() {
-  try {
-    window.loadMoreStopped = true;
-    window.loadMoreActive = false;
-    window.loadMoreExpansionStopped = true;
-    window.loadMoreExpansionActive = false;
-    notifyProgress('stopped', 0);
-  } catch (error) {
-    console.warn('Error stopping content expansion:', error);
-  }
+  window.loadMoreStopped = true
+  window.loadMoreActive = false
+  notifyProgress('stopped', 0)
 }
 
+/**
+ * Notifies progress updates with accessibility support via ARIA live regions
+ * 
+ * @param {string} action - The action performed ('clicked', 'scrolled', 'complete', 'error')
+ * @param {number} count - Current count of actions performed
+ * @param {string} details - Additional details about the action
+ */
 function notifyProgress(action, count, details = '') {
   // Send progress update to popup
   chrome.runtime.sendMessage({
@@ -558,56 +843,37 @@ function notifyProgress(action, count, details = '') {
   }).catch(() => {
     // Popup might be closed, ignore errors
   })
+  
+  // Create or update ARIA live region for screen readers
+  let liveRegion = document.getElementById('load-more-extension-live-region')
+  if (!liveRegion) {
+    liveRegion = document.createElement('div')
+    liveRegion.id = 'load-more-extension-live-region'
+    liveRegion.setAttribute('aria-live', 'polite')
+    liveRegion.setAttribute('aria-atomic', 'true')
+    liveRegion.style.cssText = `
+      position: absolute !important;
+      left: -10000px !important;
+      width: 1px !important;
+      height: 1px !important;
+      overflow: hidden !important;
+    `
+    document.body.appendChild(liveRegion)
+  }
+  
+  // Update live region with accessible message
+  const messages = {
+    clicked: `Load more content expanded. ${count} items loaded.`,
+    scrolled: `Page scrolled to load more content. ${count} actions performed.`,
+    complete: `Content expansion complete. Total ${count} items loaded.`,
+    error: `Content expansion error: ${details}`,
+    stopped: 'Content expansion stopped by user.'
+  }
+  
+  liveRegion.textContent = messages[action] || `Content expansion: ${action}. Count: ${count}.`
 }
 
-function expandHiddenContent() {
-  let expandedCount = 0
-  
-  // Selectors for common hidden content patterns
-  const hiddenContentSelectors = [
-    '.hidden', '.collapse:not(.show)', '[aria-hidden="true"]', 
-    '[style*="display: none"]', '[style*="display:none"]',
-    '[style*="visibility: hidden"]', '[style*="visibility:hidden"]',
-    '.accordion-content:not(.active)', '.tab-content:not(.active)',
-    '[data-hidden="true"]', '[data-collapsed="true"]'
-  ]
-  
-  // Try to expand each type of hidden content
-  hiddenContentSelectors.forEach(selector => {
-    const elements = document.querySelectorAll(selector)
-    elements.forEach(element => {
-      // Skip tiny elements that are likely UI controls
-      const rect = element.getBoundingClientRect()
-      if (rect.width < 50 || rect.height < 50) return
-      
-      // Try different methods to show the element
-      if (element.classList.contains('hidden')) {
-        element.classList.remove('hidden')
-        expandedCount++
-      } else if (element.classList.contains('collapse')) {
-        element.classList.add('show')
-        expandedCount++
-      } else if (element.hasAttribute('aria-hidden')) {
-        element.setAttribute('aria-hidden', 'false')
-        expandedCount++
-      } else if (element.style.display === 'none') {
-        element.style.display = 'block'
-        expandedCount++
-      } else if (element.style.visibility === 'hidden') {
-        element.style.visibility = 'visible'
-        expandedCount++
-      } else if (element.hasAttribute('data-hidden')) {
-        element.setAttribute('data-hidden', 'false')
-        expandedCount++
-      } else if (element.hasAttribute('data-collapsed')) {
-        element.setAttribute('data-collapsed', 'false')
-        expandedCount++
-      }
-    })
-  })
-  
-  return expandedCount
-}
+// expandHiddenContent function is now imported from execution module
 
 function findNextPageLink() {
   // Common selectors for pagination next links
@@ -623,7 +889,7 @@ function findNextPageLink() {
   // Try each selector
   for (const selector of nextPageSelectors) {
     try {
-      const element = document.querySelector(selector)
+      const element = queryElements(selector, document, true)
       if (element && isElementVisible(element)) {
         return element
       }
@@ -634,7 +900,7 @@ function findNextPageLink() {
   }
   
   // Fallback: look for links with "next" text
-  const allLinks = document.querySelectorAll('a')
+  const allLinks = queryElements('a')
   for (const link of allLinks) {
     const text = link.textContent?.toLowerCase().trim() || ''
     const ariaLabel = link.getAttribute('aria-label')?.toLowerCase() || ''

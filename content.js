@@ -75,6 +75,258 @@ window.addEventListener('error', (event) => {
   console.error('Load More Extension - Uncaught error:', event.error);
 });
 
+// Auto-scroll to load more buttons when page loads
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(scrollToLoadMoreButton, 1000); // Delay to ensure page is fully loaded
+});
+
+// Also handle when page is fully loaded (for cases where DOMContentLoaded already fired)
+window.addEventListener('load', () => {
+  setTimeout(scrollToLoadMoreButton, 1500); // Slightly longer delay for full page load
+});
+
+// Set up mutation observer to detect dynamically loaded content
+const setupMutationObserver = () => {
+  // Create a throttled version of scrollToLoadMoreButton for the observer
+  const throttledCheckForNewButtons = throttle(() => {
+    // Only check if we haven't already found and scrolled to a button
+    if (!window.loadMoreButtonFound) {
+      const pageAnalysis = scanPageContent();
+      if (pageAnalysis.patterns.buttons.length > 0 || pageAnalysis.patterns.links.length > 0) {
+        scrollToLoadMoreButton();
+      }
+    }
+  }, 1000);
+
+  // Create mutation observer
+  const observer = new MutationObserver((mutations) => {
+    let shouldCheck = false;
+    
+    // Check if any mutations are relevant (added nodes)
+    for (const mutation of mutations) {
+      if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+        shouldCheck = true;
+        break;
+      }
+    }
+    
+    if (shouldCheck) {
+      throttledCheckForNewButtons();
+    }
+  });
+  
+  // Start observing with a configuration
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: false,
+    characterData: false
+  });
+  
+  return observer;
+};
+
+// Initialize mutation observer after page load
+window.addEventListener('load', () => {
+  // Set a flag to track if we've found a button
+  window.loadMoreButtonFound = false;
+  
+  // Setup the observer with a slight delay
+  setTimeout(() => {
+    const observer = setupMutationObserver();
+    
+    // Disconnect after 30 seconds to avoid performance impact
+    setTimeout(() => {
+      observer.disconnect();
+      console.log('Load More Extension: Disconnected mutation observer after timeout');
+    }, 30000);
+  }, 2000);
+});
+
+// Function to automatically scroll to the first load more button
+function scrollToLoadMoreButton(retryCount = 0) {
+  const maxRetries = 5
+  const retryDelay = 500
+  
+  const loadMoreSelectors = [
+    'button[class*="load"], button[class*="more"], button[class*="show"]',
+    'a[class*="load"], a[class*="more"], a[class*="show"]',
+    '[class*="load-more"], [class*="show-more"], [class*="view-more"]',
+    '.pagination a, .pager a',
+    '[data-testid*="load"], [data-testid*="more"]',
+    'button:contains("Load"), button:contains("More"), button:contains("Show")',
+    'a:contains("Load"), a:contains("More"), a:contains("Show")'
+  ]
+  
+  let targetElement = null
+  
+  // Find the best target element
+  for (const selector of loadMoreSelectors) {
+    try {
+      const elements = document.querySelectorAll(selector)
+      if (elements.length > 0) {
+        // Find the first visible or below-viewport element
+        for (const element of elements) {
+          const rect = element.getBoundingClientRect()
+          const isVisible = rect.width > 0 && rect.height > 0
+          const isInOrBelowViewport = rect.top >= -100 // Allow some margin above viewport
+          
+          if (isVisible && isInOrBelowViewport) {
+            targetElement = element
+            break
+          }
+        }
+        if (targetElement) break
+      }
+    } catch (e) {
+      // Skip invalid selectors (like :contains which isn't valid CSS)
+      continue
+    }
+  }
+  
+  if (targetElement) {
+    // Calculate position to place button at top of viewport with margin
+    const rect = targetElement.getBoundingClientRect()
+    const scrollTop = window.pageYOffset || document.documentElement.scrollTop
+    const targetY = scrollTop + rect.top - 80 // 80px margin from top
+    
+    // Use throttled smooth scrolling
+    throttledScroll(() => {
+      window.scrollTo({
+        top: Math.max(0, targetY),
+        behavior: 'smooth'
+      })
+    })
+    
+    // Add visual highlight
+    const originalStyle = targetElement.style.cssText
+    const originalTransition = targetElement.style.transition
+    
+    targetElement.style.transition = 'all 300ms ease'
+    targetElement.style.boxShadow = '0 0 0 3px #3B82F6, 0 0 20px rgba(59, 130, 246, 0.3)'
+    targetElement.style.transform = 'scale(1.02)'
+    
+    setTimeout(() => {
+      targetElement.style.transition = originalTransition
+      targetElement.style.boxShadow = ''
+      targetElement.style.transform = ''
+      setTimeout(() => {
+        targetElement.style.cssText = originalStyle
+      }, 300)
+    }, 500)
+    
+    // Verify scroll position after a delay
+    setTimeout(() => {
+      verifyScrollPosition(targetElement, targetY)
+    }, 1000)
+    
+    return true
+  } else if (retryCount < maxRetries) {
+    // Retry after delay if no element found
+    setTimeout(() => {
+      scrollToLoadMoreButton(retryCount + 1)
+    }, retryDelay)
+    return false
+  }
+  
+  return false
+}
+
+try {
+  // Maximum retry attempts
+  const MAX_RETRIES = 3;
+  
+  // Scan page for load more buttons
+  const pageAnalysis = scanPageContent();
+  let targetElement = null;
+  let elementType = '';
+  
+  // Check if we have load more buttons
+  if (pageAnalysis.patterns.buttons.length > 0) {
+    targetElement = document.querySelector(pageAnalysis.patterns.buttons[0].selector);
+    elementType = 'button';
+  } else if (pageAnalysis.patterns.links.length > 0) {
+    // Try links if no buttons found
+    targetElement = document.querySelector(pageAnalysis.patterns.links[0].selector);
+    elementType = 'link';
+  }
+  
+  if (targetElement && isElementVisible(targetElement)) {
+    // Scroll to the element with smooth behavior
+    try {
+      throttledScrollIntoView(targetElement, { 
+        behavior: 'smooth', 
+        block: 'center'
+      });
+      console.log(`Load More Extension: Auto-scrolled to load more ${elementType}`);
+      
+      // Mark that we've found a button
+      window.loadMoreButtonFound = true;
+      
+      // Verify scroll position after a short delay
+      setTimeout(() => {
+        verifyScrollPosition(targetElement);
+      }, 500);
+    } catch (scrollError) {
+      console.error('Load More Extension: Error during scroll operation:', scrollError);
+      // Fallback to window.scrollTo if scrollIntoView fails
+      const rect = targetElement.getBoundingClientRect();
+      const scrollY = window.scrollY + rect.top - (window.innerHeight / 2);
+      throttledScrollTo(0, scrollY);
+      console.log('Load More Extension: Used fallback scroll method');
+    }
+  } else {
+    console.log(`Load More Extension: Load more element not visible or not found (attempt ${retryCount + 1})`);
+    
+    // Retry with increasing delay if element not found and under max retries
+    if (retryCount < MAX_RETRIES) {
+      const nextRetryDelay = 1000 * (retryCount + 1); // Increasing delay: 1s, 2s, 3s
+      console.log(`Load More Extension: Will retry in ${nextRetryDelay}ms`);
+      setTimeout(() => {
+        scrollToLoadMoreButton(retryCount + 1);
+      }, nextRetryDelay);
+    } else {
+      console.log('Load More Extension: Maximum retry attempts reached');
+    }
+  }
+} catch (error) {
+  console.error('Load More Extension: Error during auto-scroll:', error);
+}
+
+// Verify that the element is actually visible in the viewport after scrolling
+function verifyScrollPosition(element, targetY = null) {
+  if (!element) return;
+  
+  try {
+    const rect = element.getBoundingClientRect();
+    const currentScrollTop = window.pageYOffset || document.documentElement.scrollTop;
+    
+    // Check if element is positioned correctly at top of viewport (with 80px margin)
+    const isCorrectlyPositioned = targetY ? 
+      Math.abs(currentScrollTop - targetY) < 50 : // Allow 50px tolerance
+      (rect.top >= 60 && rect.top <= 120); // Element should be 60-120px from top
+    
+    if (!isCorrectlyPositioned) {
+      console.log('Load More Extension: Element not correctly positioned, adjusting...');
+      
+      // Calculate correct position
+      const correctY = targetY || (currentScrollTop + rect.top - 80);
+      
+      // Smooth scroll to correct position
+      window.scrollTo({
+        top: Math.max(0, correctY),
+        behavior: 'smooth'
+      });
+      
+      console.log(`Load More Extension: Adjusted scroll position to ${correctY}px`);
+    } else {
+      console.log('Load More Extension: Element correctly positioned at top of viewport');
+    }
+  } catch (error) {
+    console.error('Load More Extension: Error verifying scroll position:', error);
+  }
+}
+
 // Keyboard navigation support for accessibility
 document.addEventListener('keydown', (event) => {
   // Alt + L: Start load more expansion
@@ -355,18 +607,39 @@ function startContentExpansion(options = {}) {
       const maxScroll = document.documentElement.scrollHeight - window.innerHeight
       
       if (currentScroll < maxScroll * 0.9) {
+        // Store current content count before scrolling
+        const preScrollContentCount = getCurrentContentCount()
+        
         throttledScrollTo(0, document.documentElement.scrollHeight)
         actionTaken = true
         notifyProgress('scrolled', clickCount)
+        
+        // Wait for potential lazy loading, then check for new content
+        await sleep(delay)
+        const postScrollContentCount = getCurrentContentCount()
+        
+        if (postScrollContentCount > preScrollContentCount) {
+          // New content was loaded, scroll to show it
+          await scrollToNewlyLoadedContent(preScrollContentCount, postScrollContentCount)
+        }
       }
     }
     
     // Method 3: Expand hidden content
     if (!actionTaken && (expansionMethod === 'auto' || expansionMethod === 'expand')) {
+      const preExpandContentCount = getCurrentContentCount()
       const expandedCount = expandHiddenContent()
       if (expandedCount > 0) {
         actionTaken = true
         notifyProgress('expanded', clickCount, `${expandedCount} hidden elements`)
+        
+        // Wait for content to render, then scroll to newly visible content
+        await sleep(300)
+        const postExpandContentCount = getCurrentContentCount()
+        
+        if (postExpandContentCount > preExpandContentCount) {
+          await scrollToNewlyLoadedContent(preExpandContentCount, postExpandContentCount)
+        }
       }
     }
     
@@ -395,6 +668,9 @@ function startContentExpansion(options = {}) {
       if (newContentCount > lastContentCount) {
         lastContentCount = newContentCount
         notifyProgress('loaded', clickCount, `${newContentCount} items`)
+        
+        // Scroll to newly loaded content
+        await scrollToNewlyLoadedContent(currentContentCount, newContentCount)
       }
       
       // Continue expansion
@@ -414,6 +690,56 @@ function startContentExpansion(options = {}) {
     window.loadMoreActive = false
     window.loadMoreStopped = true
     notifyProgress('error', 0, error.message)
+  }
+}
+
+/**
+ * Scrolls to newly loaded content after successful expansion
+ * @param {number} previousCount - Content count before expansion
+ * @param {number} newCount - Content count after expansion
+ */
+async function scrollToNewlyLoadedContent(previousCount, newCount) {
+  try {
+    // Wait a moment for content to fully render
+    await sleep(300)
+    
+    // Get all content elements
+    const contentElements = queryElements(SELECTORS.CONTENT_CONTAINERS)
+    
+    if (contentElements.length >= previousCount + 1) {
+      // Find the first newly loaded element (at index previousCount)
+      const firstNewElement = contentElements[previousCount]
+      
+      if (firstNewElement && isElementVisible(firstNewElement)) {
+        // Calculate target position - scroll to show the new content with some margin
+        const elementRect = firstNewElement.getBoundingClientRect()
+        const targetY = window.pageYOffset + elementRect.top - 100 // 100px margin from top
+        
+        // Smooth scroll to the new content
+        throttledScrollTo(0, Math.max(0, targetY))
+        
+        console.log(`Scrolled to newly loaded content (element ${previousCount + 1} of ${newCount})`)
+        
+        // Verify scroll position after a short delay
+        setTimeout(() => {
+          verifyScrollPosition(firstNewElement, targetY)
+        }, 500)
+      }
+    } else {
+      // Fallback: scroll to bottom to show new content
+      const currentScroll = window.pageYOffset
+      const documentHeight = document.documentElement.scrollHeight
+      const windowHeight = window.innerHeight
+      const maxScroll = documentHeight - windowHeight
+      
+      // Scroll down by a reasonable amount to show new content
+      const scrollTarget = Math.min(maxScroll, currentScroll + windowHeight * 0.7)
+      throttledScrollTo(0, scrollTarget)
+      
+      console.log('Scrolled down to show newly loaded content (fallback method)')
+    }
+  } catch (error) {
+    console.warn('Error scrolling to newly loaded content:', error)
   }
 }
 
